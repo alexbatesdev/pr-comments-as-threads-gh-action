@@ -26,7 +26,7 @@ jobs:
 
             if ((comment.user?.type || "") === "Bot") { core.info("Skip bot"); return; }
 
-            // Get PR info
+            // 1) Get PR info
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
             const headRef = pr.head.ref;
             const headRepoFull = pr.head.repo.full_name;
@@ -37,7 +37,7 @@ jobs:
 
             const filePath = "__comment_threads.txt";
 
-            // Read (or create) the sentinel file on the PR head branch
+            // 2) Read (or create) the file on the PR head branch; append a UNIX timestamp
             let existingSha, existingText = "";
             try {
               const { data: file } = await github.rest.repos.getContent({ owner, repo, path: filePath, ref: headRef });
@@ -54,53 +54,53 @@ jobs:
             const newText = lines.join("\n").replace(/\n?$/, "\n");
             const contentB64 = Buffer.from(newText, "utf8").toString("base64");
 
-            // Commit the change
             await github.rest.repos.createOrUpdateFileContents({
               owner, repo, path: filePath, branch: headRef,
               message: `chore: update ${filePath} for PR #${prNumber} comment ${comment.id}`,
               content: contentB64, sha: existingSha
             });
 
-            // Helper: wait & fetch PR files until the new patch is visible
-            async function getFilePatchWithRetry(maxAttempts = 5, delayMs = 800) {
+            // 3) Refresh PR to get the commit that includes the write we just made
+            const { data: prAfter } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            const commit_id = prAfter.head.sha; // REQUIRED by API
+
+            // 4) Retry until PR diff has the patch for our file
+            async function getPatch(maxAttempts = 6, delayMs = 900) {
               for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 const files = await github.paginate(github.rest.pulls.listFiles, {
                   owner, repo, pull_number: prNumber, per_page: 100
                 });
-                const target = files.find(f => f.filename === filePath && typeof f.patch === "string");
-                if (target) return target.patch;
+                const f = files.find(x => x.filename === filePath && typeof x.patch === "string");
+                if (f) return f.patch;
                 if (attempt < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
               }
               throw new Error(`Patch for ${filePath} not found in PR diff after retries`);
             }
+            const patch = await getPatch();
 
-            const patch = await getFilePatchWithRetry();
-
-            // Compute 'position' for the last added line in the patch.
-            // position counts lines from the first '@@' header; includes context/add/remove lines.
-            // We pick the final '+' (not '+++') line.
+            // 5) Compute 'position' = last added line within the unified diff hunk(s)
             const patchLines = patch.split("\n");
-            const start = patchLines.findIndex(l => l.startsWith("@@"));
-            if (start === -1) throw new Error("No @@ hunk in patch");
-            let position = 0;
-            let lastAddPos = null;
-            for (let i = start + 1; i < patchLines.length; i++) {
-              position++;
+            const firstHunk = patchLines.findIndex(l => l.startsWith("@@"));
+            if (firstHunk === -1) throw new Error("No @@ hunk header in patch");
+            let pos = 0, lastAddPos = null;
+            for (let i = firstHunk + 1; i < patchLines.length; i++) {
+              pos++;
               const l = patchLines[i];
-              if (l.startsWith("+") && !l.startsWith("+++")) lastAddPos = position;
+              if (l.startsWith("+") && !l.startsWith("+++")) lastAddPos = pos;
             }
-            if (lastAddPos == null) throw new Error("No added line found in patch to anchor review comment");
+            if (lastAddPos == null) throw new Error("No added line found in patch");
 
-            // Post the review comment using 'position'
+            // 6) Create the review comment (commit_id + path + position)
             const body = `↪️ Mirrored from @${comment.user.login}:\n\n${comment.body}`;
             await github.rest.pulls.createReviewComment({
               owner, repo, pull_number: prNumber,
+              commit_id,
               path: filePath,
               position: lastAddPos,
               body
             });
 
-            // Delete the original PR (issue) comment to avoid doubles
+            // 7) Delete the original PR (issue) comment
             await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
 
             core.info(`Threadified comment ${comment.id} at position ${lastAddPos} in ${filePath} and deleted the original.`);
