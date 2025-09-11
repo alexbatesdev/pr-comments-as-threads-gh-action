@@ -24,85 +24,86 @@ jobs:
             const prNumber = context.payload.issue.number;
             const comment = context.payload.comment;
 
-            // Ignore bot-authored comments to prevent loops
-            if ((comment.user?.type || "") === "Bot") {
-              core.info("Skip bot comment");
-              return;
-            }
+            if ((comment.user?.type || "") === "Bot") { core.info("Skip bot"); return; }
 
-            // Fetch PR info
-            const { data: pr } = await github.rest.pulls.get({
-              owner, repo, pull_number: prNumber
-            });
-
-            const headRef = pr.head.ref;                 // target branch to write the file
-            const headRepoFull = pr.head.repo.full_name; // may be a fork
-
-            // Safety: only operate when we can push to the PR branch (same repo)
+            // Get PR info
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            const headRef = pr.head.ref;
+            const headRepoFull = pr.head.repo.full_name;
             if (headRepoFull.toLowerCase() !== `${owner}/${repo}`.toLowerCase()) {
-              core.warning("PR is from a fork; skipping because workflow token cannot push to the fork.");
+              core.warning("PR from fork; skipping (cannot push to fork).");
               return;
             }
 
             const filePath = "__comment_threads.txt";
 
-            // Get current file (if any)
-            let existingSha = undefined;
-            let existingText = "";
+            // Read (or create) the sentinel file on the PR head branch
+            let existingSha, existingText = "";
             try {
-              const { data: file } = await github.rest.repos.getContent({
-                owner, repo, path: filePath, ref: headRef
-              });
+              const { data: file } = await github.rest.repos.getContent({ owner, repo, path: filePath, ref: headRef });
               if (Array.isArray(file)) throw new Error("Path is a directory");
               existingSha = file.sha;
               existingText = Buffer.from(file.content, file.encoding).toString("utf8");
             } catch (e) {
-              if (e.status !== 404) throw e; // 404 = file doesn't exist yet
+              if (e.status !== 404) throw e;
             }
 
-            // Append a unix timestamp line
             const lines = existingText ? existingText.split(/\r?\n/) : [];
             const timestamp = Math.floor(Date.now() / 1000);
             lines.push(String(timestamp));
-            const newText = lines.join("\n").replace(/\n?$/, "\n"); // ensure trailing newline
+            const newText = lines.join("\n").replace(/\n?$/, "\n");
             const contentB64 = Buffer.from(newText, "utf8").toString("base64");
 
-            // Commit create/update on the PR head branch
-            const commitMessage = `chore: update ${filePath} for PR #${prNumber} comment ${comment.id}`;
+            // Commit the change
             await github.rest.repos.createOrUpdateFileContents({
-              owner, repo, path: filePath, message: commitMessage,
-              content: contentB64, branch: headRef, sha: existingSha
+              owner, repo, path: filePath, branch: headRef,
+              message: `chore: update ${filePath} for PR #${prNumber} comment ${comment.id}`,
+              content: contentB64, sha: existingSha
             });
 
-            // Determine line number we just added (1-based)
-            const lineNumber = lines.length;
+            // Helper: wait & fetch PR files until the new patch is visible
+            async function getFilePatchWithRetry(maxAttempts = 5, delayMs = 800) {
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                const files = await github.paginate(github.rest.pulls.listFiles, {
+                  owner, repo, pull_number: prNumber, per_page: 100
+                });
+                const target = files.find(f => f.filename === filePath && typeof f.patch === "string");
+                if (target) return target.patch;
+                if (attempt < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
+              }
+              throw new Error(`Patch for ${filePath} not found in PR diff after retries`);
+            }
 
-            // Refresh PR to get the new HEAD SHA that includes our commit
-            const { data: prAfter } = await github.rest.pulls.get({
-              owner, repo, pull_number: prNumber
-            });
-            const commit_id = prAfter.head.sha;
+            const patch = await getFilePatchWithRetry();
 
-            // Build threaded review comment body (copy original)
+            // Compute 'position' for the last added line in the patch.
+            // position counts lines from the first '@@' header; includes context/add/remove lines.
+            // We pick the final '+' (not '+++') line.
+            const patchLines = patch.split("\n");
+            const start = patchLines.findIndex(l => l.startsWith("@@"));
+            if (start === -1) throw new Error("No @@ hunk in patch");
+            let position = 0;
+            let lastAddPos = null;
+            for (let i = start + 1; i < patchLines.length; i++) {
+              position++;
+              const l = patchLines[i];
+              if (l.startsWith("+") && !l.startsWith("+++")) lastAddPos = position;
+            }
+            if (lastAddPos == null) throw new Error("No added line found in patch to anchor review comment");
+
+            // Post the review comment using 'position'
             const body = `↪️ Mirrored from @${comment.user.login}:\n\n${comment.body}`;
-
-            // Create an inline review comment on that line
-            const review = await github.rest.pulls.createReviewComment({
+            await github.rest.pulls.createReviewComment({
               owner, repo, pull_number: prNumber,
-              commit_id,
               path: filePath,
-              line: lineNumber,
-              side: "RIGHT",
+              position: lastAddPos,
               body
             });
 
-            // OPTIONAL: edit original instead of deleting.
-            // For your request, we delete the original PR (issue) comment:
-            await github.rest.issues.deleteComment({
-              owner, repo, comment_id: comment.id
-            });
+            // Delete the original PR (issue) comment to avoid doubles
+            await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
 
-            core.info(`Threadified comment ${comment.id} to ${filePath}:${lineNumber} and deleted the original.`);
+            core.info(`Threadified comment ${comment.id} at position ${lastAddPos} in ${filePath} and deleted the original.`);
   cleanup_on_merge:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
