@@ -22,7 +22,7 @@ jobs:
             const { owner, repo } = context.repo;
             const pr = context.payload.pull_request;
             const headRef = pr.head.ref;
-            const filePath = "__comment_threads.txt";
+            const filePath = "~comment.threads";
 
             try {
               await github.rest.repos.getContent({ owner, repo, path: filePath, ref: headRef });
@@ -63,7 +63,7 @@ jobs:
               return;
             }
 
-            const filePath = "__comment_threads.txt";
+            const filePath = "~comment.threads";
 
             // Read current file and append timestamp
             let existingSha, existingText = "";
@@ -77,11 +77,15 @@ jobs:
             }
 
             const lines = existingText ? existingText.split(/\r?\n/) : [];
-            if (lines.length === 0) lines.push("# Thread anchor – do not remove");
+            if (lines.length === 0) {
+              lines.push("# Thread anchor – do not remove");
+            } else {
+              // force a diff on the anchor line
+              lines[0] = "# Thread anchor – do not remove (touched at " + Date.now() + ")";
+            }
             const timestamp = Math.floor(Date.now() / 1000);
             lines.push(String(timestamp));
-            const newText = lines.join("\n").replace(/\n?$/, "\n");
-            const contentB64 = Buffer.from(newText, "utf8").toString("base64");
+            const contentB64 = Buffer.from(lines, "utf8").toString("base64");
 
             await github.rest.repos.createOrUpdateFileContents({
               owner, repo, path: filePath, branch: headRef,
@@ -124,7 +128,7 @@ jobs:
             const { owner, repo } = context.repo;
             const pr = context.payload.pull_request;
             const baseRef = pr.base.ref;
-            const filePath = "__comment_threads.txt";
+            const filePath = "~comment.threads";
 
             try {
               const { data: file } = await github.rest.repos.getContent({ owner, repo, path: filePath, ref: baseRef });
