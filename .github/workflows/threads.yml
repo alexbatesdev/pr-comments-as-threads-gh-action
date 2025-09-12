@@ -85,7 +85,7 @@ jobs:
             }
             const timestamp = Math.floor(Date.now() / 1000);
             lines.push(String(timestamp) + " - " + comment.body);
-            const newText = lines.join().replace(/\n?$/, "\n");
+            const newText = lines.join("\n").replace(/\n?$/, "\n");
             const contentB64 = Buffer.from(newText, "utf8").toString("base64");
 
             await github.rest.repos.createOrUpdateFileContents({
