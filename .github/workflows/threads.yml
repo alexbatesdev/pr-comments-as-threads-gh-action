@@ -1,32 +1,60 @@
 name: Threadify PR Comments & Cleanup
 
 on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
   issue_comment:
     types: [created]
-  pull_request:
-    types: [closed]
 
 permissions:
-  contents: write        # create/update/delete __comment_threads.txt
-  pull-requests: write   # create review comments
-  issues: write          # edit/delete original PR comments
+  contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
+  ensure_threads_file:
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const headRef = pr.head.ref;
+            const filePath = "__comment_threads.txt";
+
+            try {
+              await github.rest.repos.getContent({ owner, repo, path: filePath, ref: headRef });
+              core.info(`${filePath} already exists on ${headRef}`);
+            } catch (e) {
+              if (e.status !== 404) throw e;
+              const content = "# Thread anchor – do not remove\n";
+              await github.rest.repos.createOrUpdateFileContents({
+                owner, repo, path: filePath, branch: headRef,
+                message: `chore: bootstrap ${filePath} for PR #${pr.number}`,
+                content: Buffer.from(content, "utf8").toString("base64")
+              });
+              core.info(`Created ${filePath} on ${headRef}`);
+            }
+
   threadify_comment:
     if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null
     runs-on: ubuntu-latest
     steps:
-      - name: Threadify the new PR comment
-        uses: actions/github-script@v7
+      - uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
             const prNumber = context.payload.issue.number;
             const comment = context.payload.comment;
 
-            if ((comment.user?.type || "") === "Bot") { core.info("Skip bot"); return; }
+            if ((comment.user?.type || "") === "Bot") {
+              core.info("Skip bot comment");
+              return;
+            }
 
-            // 1) Get PR info
+            // Fetch PR info
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
             const headRef = pr.head.ref;
             const headRepoFull = pr.head.repo.full_name;
@@ -37,7 +65,7 @@ jobs:
 
             const filePath = "__comment_threads.txt";
 
-            // 2) Read (or create) the file on the PR head branch; append a UNIX timestamp
+            // Read current file and append timestamp
             let existingSha, existingText = "";
             try {
               const { data: file } = await github.rest.repos.getContent({ owner, repo, path: filePath, ref: headRef });
@@ -49,14 +77,9 @@ jobs:
             }
 
             const lines = existingText ? existingText.split(/\r?\n/) : [];
-            if (lines.length === 0) {
-              lines.push("# Thread anchor – do not remove");
-            } else {
-              // force a diff on the anchor line
-              lines[0] = "# Thread anchor – do not remove (touched at " + Date.now() + ")";
-            }
+            if (lines.length === 0) lines.push("# Thread anchor – do not remove");
             const timestamp = Math.floor(Date.now() / 1000);
-            lines.push(String(timestamp) + " - comment");
+            lines.push(String(timestamp));
             const newText = lines.join("\n").replace(/\n?$/, "\n");
             const contentB64 = Buffer.from(newText, "utf8").toString("base64");
 
@@ -66,61 +89,71 @@ jobs:
               content: contentB64, sha: existingSha
             });
 
-            // 3) Refresh PR to get the commit that includes the write we just made
+            // Refresh PR to get commit ID
             const { data: prAfter } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-            const commit_id = prAfter.head.sha; // REQUIRED by API
+            const commit_id = prAfter.head.sha;
 
-            // Prefer a FILE-level review comment to avoid diff hunk mapping issues.
-            const body = `### @${comment.user.login}:\n\n${comment.body}`;
+            // Wait a moment so the diff is updated
             await new Promise(r => setTimeout(r, 1500));
 
+            // Find the latest added line in the patch for our file
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: prNumber, per_page: 100
+            });
+            const f = files.find(x => x.filename === filePath && typeof x.patch === "string");
+            if (!f) throw new Error("Could not find patch for threads file");
+
+            const patchLines = f.patch.split("\n");
+            const start = patchLines.findIndex(l => l.startsWith("@@"));
+            let pos = 0, lastAddPos = null;
+            for (let i = start + 1; i < patchLines.length; i++) {
+              pos++;
+              if (patchLines[i].startsWith("+") && !patchLines[i].startsWith("+++")) {
+                lastAddPos = pos;
+              }
+            }
+            if (lastAddPos == null) throw new Error("No added line found to anchor review comment");
+
+            // Post review comment at that added line
+            const body = `### @${comment.user.login}:\n\n${comment.body}`;
             await github.rest.pulls.createReviewComment({
-              owner, repo,
-              pull_number: prNumber,
+              owner, repo, pull_number: prNumber,
               commit_id,
               path: filePath,
-              line: 1,       // anchor to sentinel line
-              side: "RIGHT",
+              position: lastAddPos,
               body
             });
 
-            // 7) Delete the original PR (issue) comment
+            // Delete the original PR (issue) comment
             await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
 
-            core.info(`Threadified comment ${comment.id} at position ${lastAddPos} in ${filePath} and deleted the original.`);
+            core.info(`Threadified comment ${comment.id} anchored at diff position ${lastAddPos} in ${filePath}`);
+
   cleanup_on_merge:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Remove __comment_threads.txt from the merge target branch
-        uses: actions/github-script@v7
+      - uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
             const pr = context.payload.pull_request;
-            const baseRef = pr.base.ref; // branch that received the merge
+            const baseRef = pr.base.ref;
             const filePath = "__comment_threads.txt";
 
-            // Try to fetch file on the base branch (it may not exist if never created/merged)
-            let sha;
             try {
-              const { data: file } = await github.rest.repos.getContent({
-                owner, repo, path: filePath, ref: baseRef
-              });
-              if (Array.isArray(file)) throw new Error("Path is a directory");
-              sha = file.sha;
+              const { data: file } = await github.rest.repos.getContent({ owner, repo, path: filePath, ref: baseRef });
+              if (!Array.isArray(file)) {
+                await github.rest.repos.deleteFile({
+                  owner, repo, path: filePath, branch: baseRef, sha: file.sha,
+                  message: `chore: remove ${filePath} after merge of #${pr.number}`
+                });
+                core.info(`Removed ${filePath} from ${baseRef}`);
+              }
             } catch (e) {
               if (e.status === 404) {
-                core.info(`${filePath} not present on ${baseRef}; nothing to remove.`);
-                return;
+                core.info(`No ${filePath} to remove on ${baseRef}`);
+              } else {
+                throw e;
               }
-              throw e;
             }
-
-            // Delete the file from the base branch
-            await github.rest.repos.deleteFile({
-              owner, repo, path: filePath, message: `chore: remove ${filePath} after merge of #${pr.number}`,
-              branch: baseRef, sha
-            });
-
-            core.info(`Removed ${filePath} from ${baseRef} after merge of PR #${pr.number}.`);
