@@ -66,7 +66,8 @@ jobs:
 
             // Prefer a FILE-level review comment to avoid diff hunk mapping issues.
             const body = `↪️ Mirrored from @${comment.user.login}:\n\n${comment.body}`;
-            
+            await new Promise(r => setTimeout(r, 1000));
+            let postedVia = "file";
             try {
               await github.rest.pulls.createReviewComment({
                 owner, repo,
@@ -77,6 +78,7 @@ jobs:
                 body
               });
             } catch (e) {
+              postedVia = "position";
               // Fallback: wait a bit and try a line-anchored comment if file-level fails (rare)
               await new Promise(r => setTimeout(r, 1500));
             
@@ -112,7 +114,11 @@ jobs:
             // 7) Delete the original PR (issue) comment
             await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
 
-            core.info(`Threadified comment ${comment.id} at position ${lastAddPos} in ${filePath} and deleted the original.`);
+            core.info(
+              postedVia === "file"
+                ? `Threadified comment ${comment.id} as a FILE-level thread in ${filePath} and deleted the original.`
+                : `Threadified comment ${comment.id} at position ${lastAddPos} in ${filePath} and deleted the original.`
+            );
   cleanup_on_merge:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
