@@ -71,7 +71,7 @@ jobs:
             const commit_id = prAfter.head.sha; // REQUIRED by API
 
             // Prefer a FILE-level review comment to avoid diff hunk mapping issues.
-            const body = `↪️ Mirrored from @${comment.user.login}:\n\n${comment.body}`;
+            const body = `### @${comment.user.login}:\n\n${comment.body}`;
             await new Promise(r => setTimeout(r, 1500));
 
             await github.rest.pulls.createReviewComment({
