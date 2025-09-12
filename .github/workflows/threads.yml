@@ -64,41 +64,50 @@ jobs:
             const { data: prAfter } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
             const commit_id = prAfter.head.sha; // REQUIRED by API
 
-            // 4) Retry until PR diff has the patch for our file
-            async function getPatch(maxAttempts = 6, delayMs = 900) {
-              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                const files = await github.paginate(github.rest.pulls.listFiles, {
-                  owner, repo, pull_number: prNumber, per_page: 100
-                });
-                const f = files.find(x => x.filename === filePath && typeof x.patch === "string");
-                if (f) return f.patch;
-                if (attempt < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
-              }
-              throw new Error(`Patch for ${filePath} not found in PR diff after retries`);
-            }
-            const patch = await getPatch();
-
-            // 5) Compute 'position' = last added line within the unified diff hunk(s)
-            const patchLines = patch.split("\n");
-            const firstHunk = patchLines.findIndex(l => l.startsWith("@@"));
-            if (firstHunk === -1) throw new Error("No @@ hunk header in patch");
-            let pos = 0, lastAddPos = null;
-            for (let i = firstHunk + 1; i < patchLines.length; i++) {
-              pos++;
-              const l = patchLines[i];
-              if (l.startsWith("+") && !l.startsWith("+++")) lastAddPos = pos;
-            }
-            if (lastAddPos == null) throw new Error("No added line found in patch");
-
-            // 6) Create the review comment (commit_id + path + position)
+            // Prefer a FILE-level review comment to avoid diff hunk mapping issues.
             const body = `↪️ Mirrored from @${comment.user.login}:\n\n${comment.body}`;
-            await github.rest.pulls.createReviewComment({
-              owner, repo, pull_number: prNumber,
-              commit_id,
-              path: filePath,
-              position: lastAddPos,
-              body
-            });
+            
+            try {
+              await github.rest.pulls.createReviewComment({
+                owner, repo,
+                pull_number: prNumber,
+                commit_id,                 // REQUIRED
+                path: filePath,            // "__comment_threads.txt"
+                subject_type: "file",      // <-- key change
+                body
+              });
+            } catch (e) {
+              // Fallback: wait a bit and try a line-anchored comment if file-level fails (rare)
+              await new Promise(r => setTimeout(r, 1500));
+            
+              // Re-list files to ensure diff is updated
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                owner, repo, pull_number: prNumber, per_page: 100
+              });
+              const f = files.find(x => x.filename === filePath && typeof x.patch === "string");
+              if (!f) throw e; // if patch is still missing, bubble original error
+            
+              // Fallback to the last added line in the patch
+              const patchLines = f.patch.split("\n");
+              const start = patchLines.findIndex(l => l.startsWith("@@"));
+              if (start === -1) throw e;
+              let pos = 0, lastAddPos = null;
+              for (let i = start + 1; i < patchLines.length; i++) {
+                pos++;
+                const l = patchLines[i];
+                if (l.startsWith("+") && !l.startsWith("+++")) lastAddPos = pos;
+              }
+              if (lastAddPos == null) throw e;
+            
+              await github.rest.pulls.createReviewComment({
+                owner, repo,
+                pull_number: prNumber,
+                commit_id,
+                path: filePath,
+                position: lastAddPos,
+                body
+              });
+            }
 
             // 7) Delete the original PR (issue) comment
             await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
