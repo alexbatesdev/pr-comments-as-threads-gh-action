@@ -102,17 +102,17 @@ jobs:
             });
             const f = files.find(x => x.filename === filePath && typeof x.patch === "string");
             if (!f) throw new Error("Could not find patch for threads file");
-
+            
             const patchLines = f.patch.split("\n");
-            const start = patchLines.findIndex(l => l.startsWith("@@"));
-            let pos = 0, lastAddPos = null;
-            for (let i = start + 1; i < patchLines.length; i++) {
-              pos++;
+            const hunkStart = patchLines.findIndex(l => l.startsWith("@@"));
+            if (hunkStart === -1) throw new Error("No diff hunk found in patch");
+            let position = null;
+            for (let i = hunkStart + 1, p = 1; i < patchLines.length; i++, p++) {
               if (patchLines[i].startsWith("+") && !patchLines[i].startsWith("+++")) {
-                lastAddPos = pos;
+                position = p;
               }
             }
-            if (lastAddPos == null) throw new Error("No added line found to anchor review comment");
+            if (position == null) throw new Error("No added line found to anchor review comment");
 
             // Post review comment at that added line
             const body = `### @${comment.user.login}:\n\n${comment.body}`;
