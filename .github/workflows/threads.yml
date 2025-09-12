@@ -120,14 +120,14 @@ jobs:
               owner, repo, pull_number: prNumber,
               commit_id,
               path: filePath,
-              position: lastAddPos,
+              position: position,
               body
             });
 
             // Delete the original PR (issue) comment
             await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
 
-            core.info(`Threadified comment ${comment.id} anchored at diff position ${lastAddPos} in ${filePath}`);
+            core.info(`Threadified comment ${comment.id} anchored at diff position ${position} in ${filePath}`);
 
   cleanup_on_merge:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
