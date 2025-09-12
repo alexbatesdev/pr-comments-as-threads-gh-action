@@ -49,6 +49,9 @@ jobs:
             }
 
             const lines = existingText ? existingText.split(/\r?\n/) : [];
+            if (lines.length === 0) {
+              lines.push("# Thread anchor – do not remove");
+            }
             const timestamp = Math.floor(Date.now() / 1000);
             lines.push(String(timestamp));
             const newText = lines.join("\n").replace(/\n?$/, "\n");
@@ -66,50 +69,17 @@ jobs:
 
             // Prefer a FILE-level review comment to avoid diff hunk mapping issues.
             const body = `↪️ Mirrored from @${comment.user.login}:\n\n${comment.body}`;
-            await new Promise(r => setTimeout(r, 1000));
-            let postedVia = "file";
-            try {
-              await github.rest.pulls.createReviewComment({
-                owner, repo,
-                pull_number: prNumber,
-                commit_id,                 // REQUIRED
-                path: filePath,            // "__comment_threads.txt"
-                subject_type: "file",      // <-- key change
-                body
-              });
-            } catch (e) {
-              postedVia = "position";
-              // Fallback: wait a bit and try a line-anchored comment if file-level fails (rare)
-              await new Promise(r => setTimeout(r, 1500));
-            
-              // Re-list files to ensure diff is updated
-              const files = await github.paginate(github.rest.pulls.listFiles, {
-                owner, repo, pull_number: prNumber, per_page: 100
-              });
-              const f = files.find(x => x.filename === filePath && typeof x.patch === "string");
-              if (!f) throw e; // if patch is still missing, bubble original error
-            
-              // Fallback to the last added line in the patch
-              const patchLines = f.patch.split("\n");
-              const start = patchLines.findIndex(l => l.startsWith("@@"));
-              if (start === -1) throw e;
-              let pos = 0, lastAddPos = null;
-              for (let i = start + 1; i < patchLines.length; i++) {
-                pos++;
-                const l = patchLines[i];
-                if (l.startsWith("+") && !l.startsWith("+++")) lastAddPos = pos;
-              }
-              if (lastAddPos == null) throw e;
-            
-              await github.rest.pulls.createReviewComment({
-                owner, repo,
-                pull_number: prNumber,
-                commit_id,
-                path: filePath,
-                position: lastAddPos,
-                body
-              });
-            }
+            await new Promise(r => setTimeout(r, 1500));
+
+            await github.rest.pulls.createReviewComment({
+              owner, repo,
+              pull_number: prNumber,
+              commit_id,
+              path: filePath,
+              line: 1,       // anchor to sentinel line
+              side: "RIGHT",
+              body
+            });
 
             // 7) Delete the original PR (issue) comment
             await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
