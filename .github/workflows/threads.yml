@@ -64,45 +64,9 @@ jobs:
             }
 
             const filePath = "~comment.threads";
-
-            // Read current file and append timestamp
-            let existingSha, existingText = "";
-            try {
-              const { data: file } = await github.rest.repos.getContent({ owner, repo, path: filePath, ref: headRef });
-              if (Array.isArray(file)) throw new Error("Path is a directory");
-              existingSha = file.sha;
-              existingText = Buffer.from(file.content, file.encoding).toString("utf8");
-            } catch (e) {
-              if (e.status !== 404) throw e;
-            }
-
-            const lines = existingText ? existingText.split(/\r?\n/) : [];
-            if (lines.length === 0) {
-              lines.push("# Thread anchor – do not remove");
-            } else {
-              // force a diff on the anchor line
-              lines[0] = "# Thread anchor – do not remove (touched at " + Date.now() + ")";
-            }
-            const timestamp = Math.floor(Date.now() / 1000);
-            lines.push(String(timestamp) + " - " + comment.body);
-            const newText = lines.join("\n").replace(/\n?$/, "\n");
-            const contentB64 = Buffer.from(newText, "utf8").toString("base64");
-
-            await github.rest.repos.createOrUpdateFileContents({
-              owner, repo, path: filePath, branch: headRef,
-              message: `chore: update ${filePath} for PR #${prNumber} comment ${comment.id}`,
-              content: contentB64, sha: existingSha
-            });
-
-            // Refresh PR to get commit ID
-            const { data: prAfter } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-            const commit_id = prAfter.head.sha;
-
-            // Wait a moment so the diff is updated
-            await new Promise(r => setTimeout(r, 1500));
+            const commit_id = pr.head.sha;
 
             const body = `### @\\${comment.user.login}:\n\n${comment.body}`;
-            await new Promise(r => setTimeout(r, 1500));
 
             await github.rest.pulls.createReviewComment({
               owner, repo,
