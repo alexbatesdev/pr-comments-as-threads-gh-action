@@ -96,38 +96,23 @@ jobs:
             // Wait a moment so the diff is updated
             await new Promise(r => setTimeout(r, 1500));
 
-            // Find the latest added line in the patch for our file
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner, repo, pull_number: prNumber, per_page: 100
-            });
-            const f = files.find(x => x.filename === filePath && typeof x.patch === "string");
-            if (!f) throw new Error("Could not find patch for threads file");
-            
-            const patchLines = f.patch.split("\n");
-            const hunkStart = patchLines.findIndex(l => l.startsWith("@@"));
-            if (hunkStart === -1) throw new Error("No diff hunk found in patch");
-            let position = null;
-            for (let i = hunkStart + 1, p = 1; i < patchLines.length; i++, p++) {
-              if (patchLines[i].startsWith("+") && !patchLines[i].startsWith("+++")) {
-                position = p;
-              }
-            }
-            if (position == null) throw new Error("No added line found to anchor review comment");
-
-            // Post review comment at that added line
             const body = `### @${comment.user.login}:\n\n${comment.body}`;
+            await new Promise(r => setTimeout(r, 1500));
+
             await github.rest.pulls.createReviewComment({
-              owner, repo, pull_number: prNumber,
+              owner, repo,
+              pull_number: prNumber,
               commit_id,
               path: filePath,
-              position: position,
+              line: 1,       // anchor to sentinel line
+              side: "RIGHT",
               body
             });
 
             // Delete the original PR (issue) comment
             await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
 
-            core.info(`Threadified comment ${comment.id} anchored at diff position ${position} in ${filePath}`);
+            core.info(`Threadified comment ${comment.id} anchored in ${filePath}`);
 
   cleanup_on_merge:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
