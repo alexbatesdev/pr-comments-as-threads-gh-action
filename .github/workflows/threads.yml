@@ -84,8 +84,9 @@ jobs:
               lines[0] = "# Thread anchor – do not remove (touched at " + Date.now() + ")";
             }
             const timestamp = Math.floor(Date.now() / 1000);
-            lines.push(String(timestamp));
-            const contentB64 = Buffer.from(lines, "utf8").toString("base64");
+            lines.push(String(timestamp) + " - " + comment);
+            const newText = lines.join("\n").replace(/\n?$/, "\n");
+            const contentB64 = Buffer.from(newText, "utf8").toString("base64");
 
             await github.rest.repos.createOrUpdateFileContents({
               owner, repo, path: filePath, branch: headRef,
@@ -100,7 +101,7 @@ jobs:
             // Wait a moment so the diff is updated
             await new Promise(r => setTimeout(r, 1500));
 
-            const body = `### @${comment.user.login}:\n\n${comment.body}`;
+            const body = `### @\\${comment.user.login}:\n\n${comment.body}`;
             await new Promise(r => setTimeout(r, 1500));
 
             await github.rest.pulls.createReviewComment({
