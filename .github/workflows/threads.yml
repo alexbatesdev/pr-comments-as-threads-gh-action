@@ -51,9 +51,12 @@ jobs:
             const lines = existingText ? existingText.split(/\r?\n/) : [];
             if (lines.length === 0) {
               lines.push("# Thread anchor – do not remove");
+            } else {
+              // force a diff on the anchor line
+              lines[0] = "# Thread anchor – do not remove (touched at " + Date.now() + ")";
             }
             const timestamp = Math.floor(Date.now() / 1000);
-            lines.push(String(timestamp));
+            lines.push(String(timestamp) + " - comment");
             const newText = lines.join("\n").replace(/\n?$/, "\n");
             const contentB64 = Buffer.from(newText, "utf8").toString("base64");
 
@@ -84,11 +87,7 @@ jobs:
             // 7) Delete the original PR (issue) comment
             await github.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
 
-            core.info(
-              postedVia === "file"
-                ? `Threadified comment ${comment.id} as a FILE-level thread in ${filePath} and deleted the original.`
-                : `Threadified comment ${comment.id} at position ${lastAddPos} in ${filePath} and deleted the original.`
-            );
+            core.info(`Threadified comment ${comment.id} at position ${lastAddPos} in ${filePath} and deleted the original.`);
   cleanup_on_merge:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
